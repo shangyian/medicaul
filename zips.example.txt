@@ -1,0 +1,7 @@
+# Format: STATE,ZIP  (one ZIP per CA rating area as an example)
+CA,94582
+CA,90001
+CA,95814
+NY,10001
+TX,75201
+FL,33101

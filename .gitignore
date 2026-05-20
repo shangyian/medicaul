@@ -1,3 +1,13 @@
+# medicaul build artifacts
+data.duckdb
+data.duckdb.wal
+site/dist/
+
+# Raw scrape archives — keep recent ones gitted if you want, but the directory
+# can balloon over time; leaving uncommitted by default. Promote individual
+# files when worth archiving.
+out/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -164,8 +174,8 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
-/site
+# mkdocs documentation — disabled; we use `site/` for the actual frontend source
+# /site
 
 # mypy
 .mypy_cache/

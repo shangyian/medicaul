@@ -1,0 +1,822 @@
+"""
+Static site builder for medicaul.
+
+Produces one dynamic explorer page (dist/index.html) that loads sharded JSON
+data from dist/data/ based on selector state (state, plan, year, ZIP, gender,
+tobacco). Selector state is also reflected in the URL query string so any view
+is shareable.
+
+No backend, no build tools beyond this script. The "dynamism" is purely
+client-side over pre-scraped data.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import shutil
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
+DIST = ROOT / "dist"
+DATA_OUT = DIST / "data"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+import db  # noqa: E402
+
+STATE_NAMES = {
+    "CA": "California",
+    "NY": "New York",
+    "TX": "Texas",
+    "FL": "Florida",
+    "WA": "Washington",
+    "OR": "Oregon",
+    "AZ": "Arizona",
+    "IL": "Illinois",
+    "MA": "Massachusetts",
+    "CT": "Connecticut",
+}
+
+BIRTHDAY_RULE_NOTES = {
+    "CA": "Each year, for at least 30 days starting on your birthday, you can switch to any equal-or-lesser Plan from any carrier with no medical underwriting.",
+    "OR": "30-day window each year starting on your birthday.",
+    "ID": "63 days following your birthday.",
+    "IL": "45 days following your birthday (ages 65–75).",
+    "LA": "30 days from your birthday.",
+    "NV": "60 days following your birthday.",
+    "OK": "60 days following your birthday.",
+    "CT": "Continuous open enrollment — switch any time without underwriting.",
+    "MA": "Continuous open enrollment.",
+    "NY": "Continuous open enrollment — switch any time without underwriting.",
+    "MO": "Anniversary rule: 60 days around your policy anniversary.",
+}
+
+
+def build_data_shards(conn) -> dict:
+    """
+    Emit one JSON per (state, plan, year) and a top-level manifest.
+
+    Each shard:
+      { state, plan, year,
+        zips: [list of zip codes],
+        rows: [{zip, carrier, rate_type, age, gender, tobacco, premium}, ...] }
+    """
+    DATA_OUT.mkdir(parents=True, exist_ok=True)
+
+    # Only build from the most recent snapshot. Older snapshots are kept in the
+    # DB for time-series work later.
+    snapshot = db.latest_snapshot(conn)
+    if snapshot is None:
+        raise SystemExit("No data in premiums table; run scrape.py first.")
+
+    manifest = {
+        "refreshed": snapshot.isoformat(),
+        "built": dt.date.today().isoformat(),
+        "states": defaultdict(
+            lambda: {
+                "name": "",
+                "plans": defaultdict(
+                    lambda: {
+                        "years": defaultdict(
+                            lambda: {
+                                "zips": set(),
+                                "genders": set(),
+                                "tobaccos": set(),
+                                "n_carriers": 0,
+                            }
+                        ),
+                    }
+                ),
+                "birthday_rule": None,
+            }
+        ),
+    }
+
+    combos = conn.execute(
+        """
+        SELECT DISTINCT state, plan, year
+        FROM premiums
+        WHERE snapshot_date = ?
+        ORDER BY state, plan, year
+        """,
+        [snapshot],
+    ).fetchall()
+
+    for state, plan, year in combos:
+        year = int(year)
+        shard_rows = conn.execute(
+            """
+            SELECT zip, carrier, rate_type, age, gender, tobacco, premium
+            FROM premiums
+            WHERE snapshot_date = ?
+              AND state = ? AND plan = ? AND year = ?
+            ORDER BY zip, carrier, age, gender, tobacco
+            """,
+            [snapshot, state, plan, year],
+        ).fetchall()
+
+        rows = [
+            {
+                "zip": r[0],
+                "carrier": r[1],
+                "rate_type": r[2],
+                "age": int(r[3]),
+                "gender": r[4],
+                "tobacco": "true" if r[5] else "false",
+                "premium": round(float(r[6]), 2),
+            }
+            for r in shard_rows
+        ]
+
+        zips = sorted({r["zip"] for r in rows})
+        genders = sorted({r["gender"] for r in rows})
+        tobaccos = sorted({r["tobacco"] for r in rows})
+
+        shard = {
+            "state": state,
+            "state_name": STATE_NAMES.get(state, state),
+            "plan": plan,
+            "year": year,
+            "zips": zips,
+            "genders": genders,
+            "tobaccos": tobaccos,
+            "rows": rows,
+        }
+        path = DATA_OUT / f"{state}-{plan}-{year}.json"
+        path.write_text(json.dumps(shard, separators=(",", ":")))
+
+        m = manifest["states"][state]
+        m["name"] = STATE_NAMES.get(state, state)
+        m["birthday_rule"] = BIRTHDAY_RULE_NOTES.get(state)
+        my = m["plans"][plan]["years"][year]
+        my["zips"].update(zips)
+        my["genders"].update(genders)
+        my["tobaccos"].update(tobaccos)
+        my["n_carriers"] = len({r["carrier"] for r in rows})
+
+    # Convert sets to sorted lists
+    out_manifest = {"refreshed": manifest["refreshed"], "built": manifest["built"], "states": {}}
+    for state, sd in manifest["states"].items():
+        out_state = {"name": sd["name"], "birthday_rule": sd["birthday_rule"], "plans": {}}
+        for plan, pd_ in sd["plans"].items():
+            out_plan = {"years": {}}
+            for year, yd in pd_["years"].items():
+                out_plan["years"][str(year)] = {
+                    "zips": sorted(yd["zips"]),
+                    "genders": sorted(yd["genders"]),
+                    "tobaccos": sorted(yd["tobaccos"]),
+                    "n_carriers": yd["n_carriers"],
+                }
+            out_state["plans"][plan] = out_plan
+        out_manifest["states"][state] = out_state
+
+    (DATA_OUT / "manifest.json").write_text(json.dumps(out_manifest, indent=2))
+    return out_manifest
+
+
+PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>medicaul — Medigap rate explorer</title>
+<link rel="stylesheet" href="style.css">
+<meta name="description" content="Neutral, interactive view of Medicare supplement (Medigap) rates. Not a broker.">
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6"></script>
+</head>
+<body>
+<header>
+  <a class="wordmark" href="./">medicaul</a>
+  <div class="tagline">Medicare supplement (Medigap) rate data. Not a broker. No quotes, no calls, no email signup.</div>
+</header>
+<main>
+
+<h1>Medigap rate explorer
+<span class="meta" id="report-meta">Loading…</span>
+</h1>
+
+<p>Every Medigap policy of a given letter (A, B, C, D, F, G, K, L, M, N) covers
+<em>identical</em>, federally-standardized benefits. The only differences between carriers are
+price, how that price changes as you age, and customer service. This explorer shows the first two.</p>
+
+<form id="selectors" class="selectors" autocomplete="off">
+  <label>State
+    <select name="state" id="sel-state"></select>
+  </label>
+  <label>Plan letter
+    <select name="plan" id="sel-plan"></select>
+  </label>
+  <label>Year
+    <select name="year" id="sel-year"></select>
+  </label>
+  <label>ZIP
+    <select name="zip" id="sel-zip"></select>
+  </label>
+  <label>Gender
+    <select name="gender" id="sel-gender"></select>
+  </label>
+  <label>Tobacco
+    <select name="tobacco" id="sel-tobacco"></select>
+  </label>
+</form>
+
+<div id="state-callout" class="callout"></div>
+<div id="lede"></div>
+
+<h2>Each carrier's price curve</h2>
+<p>One panel per carrier, sorted left-to-right and top-to-bottom by starting price for the
+selected slice. Hover over the line for the exact monthly premium at any age.</p>
+<div id="chart-grid" class="plot"></div>
+
+<h2>All carriers, one chart</h2>
+<p>The same data overlaid, with one line per carrier, colored by rate-pricing model.
+Use this view to compare the <em>families</em> rather than individual carriers.</p>
+<div class="chart-controls">
+  <label><input type="checkbox" id="show-labels"> Show carrier labels</label>
+</div>
+<div id="chart-overlay" class="plot"></div>
+
+<h2>Premiums at a given age</h2>
+<p>Drag the slider to see each carrier's monthly premium at that age. Watching the ranking
+re-order is the most direct way to see how starting price doesn't predict later price.</p>
+<div class="chart-controls">
+  <label for="age-slider">Age: <span id="age-readout" class="num"></span></label>
+  <input type="range" id="age-slider" min="65" max="90" value="65" step="1">
+</div>
+<div id="chart-scatter" class="plot"></div>
+
+<h2>Cumulative cost from starting age</h2>
+<p>Running total of premiums × 12 starting from the youngest age in the data. Where two lines
+cross, the carriers' cumulative costs have flipped. (This snapshot does not include future
+inflation-based rate increases — see the note below.)</p>
+<div id="chart-cumulative" class="plot"></div>
+
+<h2>Full data</h2>
+<p>Click a column header to sort. Filter by rate type using the dropdown.</p>
+<div class="chart-controls">
+  <label>Rate type:
+    <select id="table-filter">
+      <option value="">all</option>
+      <option value="ATTAINED_AGE">attained-age</option>
+      <option value="ISSUE_AGE">issue-age</option>
+      <option value="COMMUNITY_RATED">community-rated</option>
+    </select>
+  </label>
+</div>
+<div id="data-table" class="table-wrap"></div>
+
+<h2>How to read this data</h2>
+
+<p><span class="tag attained">Attained Age</span> &nbsp; Premium is based on your <em>current</em> age and increases each year as you age.
+About 3 in 4 US Medigap policies are priced this way.</p>
+
+<p><span class="tag issue">Issue Age</span> &nbsp; Premium is locked at the age you purchased the policy. Doesn't rise <em>because</em>
+you age, but still rises with the carrier's annual inflation filings.</p>
+
+<p><span class="tag community">Community Rated</span> &nbsp; Same price for everyone in the rating area regardless of age. Doesn't escalate
+with age. Still subject to the carrier's annual inflation filings.</p>
+
+<div class="callout">
+  <strong>What this page does not show.</strong>
+  All carriers — attained-age, issue-age, and community-rated — file <em>annual</em> rate increases
+  for medical inflation and claims experience, on top of the age curve. Those increases hit everyone in the
+  book and aren't reflected in this snapshot. A carrier that files 7% annual increases will cost dramatically more
+  over 25 years than one that files 3%. Adding historical rate-filing data is a planned next step.
+</div>
+
+<h2>Methodology</h2>
+<p>Premiums are fetched from <code>medicare.gov/api/v1/data/plan-compare/medigap/policies</code>, the same JSON
+API that powers the official Medigap finder on medicare.gov. For each (age, gender, tobacco) tuple,
+the endpoint returns one monthly premium per carrier.</p>
+<p>Source code and raw CSVs: <a href="https://github.com/">repository</a>.</p>
+
+</main>
+<footer>
+  <div class="row">
+    <div>
+      <strong>Sources.</strong> Premiums fetched from the public medicare.gov plan-compare API.
+      Methodology and code: <a href="https://github.com/">repository</a>.
+    </div>
+    <div class="refreshed">
+      Data refreshed <span id="refreshed-date"></span><br>
+      Page built <span id="built-date">{built}</span>
+    </div>
+  </div>
+  <p style="margin-top:1.5rem">
+    medicaul is not an insurance broker, agent, or advisor. We do not sell policies, collect contact
+    information, or receive commissions. For personalized help, contact your free state
+    <a href="https://www.shiphelp.org">SHIP counselor</a> — they're federally funded and don't earn commissions.
+  </p>
+</footer>
+
+<script>
+const MANIFEST_URL = "data/manifest.json";
+const SHARD_URL = (s, p, y) => `data/${{s}}-${{p}}-${{y}}.json`;
+
+const RATE_COLORS = {{
+  ATTAINED_AGE: "#c44536",
+  ISSUE_AGE: "#2c5d8f",
+  COMMUNITY_RATED: "#4a7c4e",
+}};
+
+const STATE = {{
+  manifest: null,
+  shard: null,
+  filtered: [],       // rows after filtering by zip/gender/tobacco
+  selectors: {{state: null, plan: null, year: null, zip: null, gender: null, tobacco: null}},
+}};
+
+function $(id) {{ return document.getElementById(id); }}
+
+function setOptions(sel, options, current) {{
+  sel.innerHTML = "";
+  for (const o of options) {{
+    const opt = document.createElement("option");
+    opt.value = typeof o === "string" ? o : o.value;
+    opt.textContent = typeof o === "string" ? o : o.label;
+    sel.appendChild(opt);
+  }}
+  if (current != null && options.some(o => (typeof o === "string" ? o : o.value) === current)) {{
+    sel.value = current;
+  }}
+}}
+
+function readURL() {{
+  const u = new URL(window.location.href);
+  const get = k => u.searchParams.get(k);
+  return {{
+    state: get("state"), plan: get("plan"), year: get("year"),
+    zip: get("zip"), gender: get("gender"), tobacco: get("tobacco"),
+  }};
+}}
+
+function writeURL() {{
+  const u = new URL(window.location.href);
+  for (const [k, v] of Object.entries(STATE.selectors)) {{
+    if (v != null) u.searchParams.set(k, v);
+  }}
+  history.replaceState(null, "", u.toString());
+}}
+
+function genderLabel(g) {{ return g.replace("GENDER_", "").charAt(0) + g.replace("GENDER_", "").slice(1).toLowerCase(); }}
+function tobaccoLabel(t) {{ return t === "true" ? "smoker" : "non-smoker"; }}
+
+async function populateSelectors() {{
+  const m = STATE.manifest;
+  const url = readURL();
+  const states = Object.keys(m.states).sort();
+  const sState = url.state && m.states[url.state] ? url.state : states[0];
+  setOptions($("sel-state"), states.map(s => ({{value: s, label: m.states[s].name + ` (${{s}})`}})), sState);
+  STATE.selectors.state = sState;
+
+  const plans = Object.keys(m.states[sState].plans).sort();
+  const sPlan = url.plan && plans.includes(url.plan) ? url.plan : plans[0];
+  setOptions($("sel-plan"), plans, sPlan);
+  STATE.selectors.plan = sPlan;
+
+  const years = Object.keys(m.states[sState].plans[sPlan].years).sort().reverse();
+  const sYear = url.year && years.includes(url.year) ? url.year : years[0];
+  setOptions($("sel-year"), years, sYear);
+  STATE.selectors.year = sYear;
+
+  const yearData = m.states[sState].plans[sPlan].years[sYear];
+  const sZip = url.zip && yearData.zips.includes(url.zip) ? url.zip : yearData.zips[0];
+  setOptions($("sel-zip"), yearData.zips, sZip);
+  STATE.selectors.zip = sZip;
+
+  const sGender = url.gender && yearData.genders.includes(url.gender) ? url.gender : yearData.genders[0];
+  setOptions($("sel-gender"), yearData.genders.map(g => ({{value: g, label: genderLabel(g)}})), sGender);
+  STATE.selectors.gender = sGender;
+
+  const sTobacco = url.tobacco && yearData.tobaccos.includes(url.tobacco) ? url.tobacco : yearData.tobaccos[0];
+  setOptions($("sel-tobacco"), yearData.tobaccos.map(t => ({{value: t, label: tobaccoLabel(t)}})), sTobacco);
+  STATE.selectors.tobacco = sTobacco;
+}}
+
+async function loadShard() {{
+  const {{state, plan, year}} = STATE.selectors;
+  const res = await fetch(SHARD_URL(state, plan, year));
+  STATE.shard = await res.json();
+}}
+
+function applyFilter() {{
+  const {{zip, gender, tobacco}} = STATE.selectors;
+  STATE.filtered = STATE.shard.rows.filter(r =>
+    r.zip === zip && r.gender === gender && r.tobacco === tobacco
+  );
+}}
+
+function summarize() {{
+  const data = STATE.filtered;
+  if (!data.length) return null;
+  const ages = data.map(d => d.age);
+  const minAge = Math.min(...ages), maxAge = Math.max(...ages);
+  const atMin = data.filter(d => d.age === minAge);
+  const carriers = new Set(data.map(d => d.carrier));
+  const counts = {{ATTAINED_AGE: 0, ISSUE_AGE: 0, COMMUNITY_RATED: 0}};
+  const seen = new Set();
+  for (const r of atMin) {{
+    if (!seen.has(r.carrier)) {{ seen.add(r.carrier); counts[r.rate_type] = (counts[r.rate_type] || 0) + 1; }}
+  }}
+  const premiums = atMin.map(d => d.premium);
+  return {{
+    minAge, maxAge,
+    nCarriers: carriers.size,
+    counts,
+    pMin: Math.min(...premiums),
+    pMax: Math.max(...premiums),
+  }};
+}}
+
+function renderLede() {{
+  const s = STATE.shard;
+  const sel = STATE.selectors;
+  const sum = summarize();
+  if (!sum) {{
+    $("lede").innerHTML = `<div class="callout">No data for this combination of selectors. Try a different ZIP, gender, or tobacco status.</div>`;
+    $("report-meta").textContent = "";
+    return;
+  }}
+  $("report-meta").innerHTML = `${{s.state_name}} · Plan ${{s.plan}} · ZIP ${{sel.zip}} · ${{s.year}} · ${{sum.nCarriers}} carriers · ages ${{sum.minAge}}–${{sum.maxAge}}`;
+  const parts = [];
+  if (sum.counts.ATTAINED_AGE) parts.push(`${{sum.counts.ATTAINED_AGE}} attained-age`);
+  if (sum.counts.ISSUE_AGE) parts.push(`${{sum.counts.ISSUE_AGE}} issue-age`);
+  if (sum.counts.COMMUNITY_RATED) parts.push(`${{sum.counts.COMMUNITY_RATED}} community-rated`);
+  $("lede").innerHTML = `<p>${{sum.nCarriers}} carriers sell Plan ${{s.plan}} in ZIP ${{sel.zip}} (${{parts.join(", ")}}).
+    Starting monthly premiums at age ${{sum.minAge}} for ${{genderLabel(sel.gender).toLowerCase()}}, ${{tobaccoLabel(sel.tobacco)}}
+    range from <strong>$${{sum.pMin.toFixed(0)}}</strong> to <strong>$${{sum.pMax.toFixed(0)}}</strong>.
+    The charts below show each carrier's price curve.</p>`;
+
+  // Birthday rule callout
+  const rule = STATE.manifest.states[sel.state].birthday_rule;
+  $("state-callout").innerHTML = rule
+    ? `<strong>${{s.state_name}}.</strong> ${{rule}}`
+    : `<strong>${{s.state_name}}.</strong> Outside the federal open enrollment period (your first 6 months on Medicare), switching Medigap carriers usually requires medical underwriting.`;
+
+  // Age slider bounds
+  const slider = $("age-slider");
+  slider.min = sum.minAge;
+  slider.max = sum.maxAge;
+  if (slider.value < sum.minAge || slider.value > sum.maxAge) slider.value = sum.minAge;
+  $("age-readout").textContent = slider.value;
+}}
+
+function carrierOrder(data) {{
+  const minAge = Math.min(...data.map(d => d.age));
+  const atMin = data.filter(d => d.age === minAge).sort((a, b) => a.premium - b.premium);
+  return atMin.map(d => d.carrier);
+}}
+
+// ---------- Charts ----------
+
+function renderGrid() {{
+  const c = $("chart-grid");
+  c.innerHTML = "";
+  if (!STATE.filtered.length) return;
+  const data = STATE.filtered;
+  const carriers = carrierOrder(data);
+  const rateBy = Object.fromEntries(data.map(r => [r.carrier, r.rate_type]));
+  const premiumMax = Math.max(...data.map(d => d.premium));
+  const minAge = Math.min(...data.map(d => d.age));
+  const maxAge = Math.max(...data.map(d => d.age));
+
+  const grid = document.createElement("div");
+  grid.className = "panel-grid";
+  c.appendChild(grid);
+
+  for (const carrier of carriers) {{
+    const rows = data.filter(d => d.carrier === carrier).sort((a, b) => a.age - b.age);
+    const rt = rateBy[carrier];
+    const color = RATE_COLORS[rt];
+    const start = rows[0].premium;
+    const end = rows[rows.length - 1].premium;
+    const pct = ((end / start) - 1) * 100;
+
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    panel.innerHTML = `<div class="panel-title">
+      <div class="panel-carrier">${{carrier}}</div>
+      <div class="panel-meta">${{rt.replace("_", " ").toLowerCase()}} · $${{Math.round(start)}} → $${{Math.round(end)}} (${{pct >= 0 ? "+" : ""}}${{pct.toFixed(0)}}%)</div>
+    </div>`;
+    const plot = Plot.plot({{
+      width: 280, height: 130,
+      marginLeft: 40, marginBottom: 26, marginTop: 6, marginRight: 8,
+      x: {{label: null, domain: [minAge, maxAge]}},
+      y: {{label: null, domain: [0, premiumMax * 1.05], grid: true, tickFormat: d => "$" + d}},
+      marks: [
+        Plot.lineY(rows, {{x: "age", y: "premium", stroke: color, strokeWidth: 2}}),
+        Plot.dot(rows, {{x: "age", y: "premium", fill: color, r: 1.4}}),
+        Plot.tip(rows, Plot.pointerX({{
+          x: "age", y: "premium",
+          title: d => `Age ${{d.age}}\\n$${{d.premium.toFixed(2)}}/mo`,
+          fontSize: 11,
+        }})),
+      ],
+    }});
+    panel.appendChild(plot);
+    grid.appendChild(panel);
+  }}
+}}
+
+function renderOverlay(showLabels = false) {{
+  const c = $("chart-overlay");
+  c.innerHTML = "";
+  if (!STATE.filtered.length) return;
+  const data = STATE.filtered;
+  const minAge = Math.min(...data.map(d => d.age));
+  const maxAge = Math.max(...data.map(d => d.age));
+
+  const marks = [
+    Plot.lineY(data, {{
+      x: "age", y: "premium", stroke: "rate_type", z: "carrier",
+      strokeWidth: 1.4, strokeOpacity: 0.7,
+    }}),
+    Plot.tip(data, Plot.pointer({{
+      x: "age", y: "premium",
+      stroke: "rate_type",
+      title: d => `${{d.carrier}}\\nAge ${{d.age}} · $${{d.premium.toFixed(2)}}/mo`,
+      fontSize: 12,
+    }})),
+  ];
+  if (showLabels) {{
+    const carriers = carrierOrder(data);
+    const labels = carriers.map(carrier => {{
+      const rows = data.filter(d => d.carrier === carrier).sort((a, b) => a.age - b.age);
+      return rows[rows.length - 1];
+    }});
+    marks.push(Plot.text(labels, {{
+      x: d => d.age + 0.3, y: "premium", text: "carrier",
+      textAnchor: "start", fontSize: 9, fill: "#444",
+    }}));
+  }}
+
+  c.appendChild(Plot.plot({{
+    width: 720, height: 460,
+    marginLeft: 56, marginBottom: 40, marginRight: showLabels ? 280 : 16,
+    x: {{label: "Age", domain: [minAge, maxAge]}},
+    y: {{label: "Monthly premium ($)", grid: true, tickFormat: d => "$" + d}},
+    color: {{
+      domain: ["ATTAINED_AGE", "ISSUE_AGE", "COMMUNITY_RATED"],
+      range: [RATE_COLORS.ATTAINED_AGE, RATE_COLORS.ISSUE_AGE, RATE_COLORS.COMMUNITY_RATED],
+      legend: true,
+    }},
+    marks,
+  }}));
+}}
+
+function renderScatter(age) {{
+  const c = $("chart-scatter");
+  c.innerHTML = "";
+  if (!STATE.filtered.length) return;
+  const atAge = STATE.filtered.filter(d => d.age === age).sort((a, b) => a.premium - b.premium);
+  const carrierDomain = atAge.map(d => d.carrier);
+  const maxP = Math.max(...STATE.filtered.map(d => d.premium));
+
+  c.appendChild(Plot.plot({{
+    width: 720, height: Math.max(320, 22 * atAge.length),
+    marginLeft: 320, marginBottom: 40, marginRight: 60,
+    x: {{label: "Monthly premium ($)", domain: [0, maxP * 1.05], grid: true, tickFormat: d => "$" + d}},
+    y: {{domain: carrierDomain, label: null}},
+    color: {{
+      domain: ["ATTAINED_AGE", "ISSUE_AGE", "COMMUNITY_RATED"],
+      range: [RATE_COLORS.ATTAINED_AGE, RATE_COLORS.ISSUE_AGE, RATE_COLORS.COMMUNITY_RATED],
+    }},
+    marks: [
+      Plot.ruleY(atAge, {{y: "carrier", stroke: "#eee"}}),
+      Plot.dot(atAge, {{x: "premium", y: "carrier", fill: "rate_type", r: 5}}),
+      Plot.text(atAge, {{
+        x: "premium", y: "carrier", text: d => "$" + d.premium.toFixed(0),
+        dx: 8, textAnchor: "start", fontSize: 11,
+      }}),
+    ],
+  }}));
+}}
+
+function renderCumulative() {{
+  const c = $("chart-cumulative");
+  c.innerHTML = "";
+  if (!STATE.filtered.length) return;
+  const data = STATE.filtered;
+  const carriers = carrierOrder(data);
+  const minAge = Math.min(...data.map(d => d.age));
+  const maxAge = Math.max(...data.map(d => d.age));
+
+  const cum = [];
+  for (const carrier of carriers) {{
+    const rows = data.filter(d => d.carrier === carrier).sort((a, b) => a.age - b.age);
+    let total = 0;
+    for (const r of rows) {{
+      total += r.premium * 12;
+      cum.push({{carrier, age: r.age, rate_type: r.rate_type, cumulative: total}});
+    }}
+  }}
+
+  c.appendChild(Plot.plot({{
+    width: 720, height: 460,
+    marginLeft: 64, marginBottom: 40, marginRight: 16,
+    x: {{label: "Age", domain: [minAge, maxAge]}},
+    y: {{label: "Cumulative premium paid ($)", grid: true, tickFormat: d => "$" + (d/1000).toFixed(0) + "k"}},
+    color: {{
+      domain: ["ATTAINED_AGE", "ISSUE_AGE", "COMMUNITY_RATED"],
+      range: [RATE_COLORS.ATTAINED_AGE, RATE_COLORS.ISSUE_AGE, RATE_COLORS.COMMUNITY_RATED],
+      legend: true,
+    }},
+    marks: [
+      Plot.lineY(cum, {{
+        x: "age", y: "cumulative", stroke: "rate_type", z: "carrier",
+        strokeWidth: 1.4, strokeOpacity: 0.7,
+      }}),
+      Plot.tip(cum, Plot.pointer({{
+        x: "age", y: "cumulative",
+        stroke: "rate_type",
+        title: d => `${{d.carrier}}\\nAge ${{d.age}} · $${{d.cumulative.toLocaleString()}} paid to date`,
+        fontSize: 12,
+      }})),
+    ],
+  }}));
+}}
+
+let tableSort = {{col: "premium_at_min", dir: 1}};
+let tableFilter = "";
+
+function renderTable() {{
+  const c = $("data-table");
+  if (!STATE.filtered.length) {{ c.innerHTML = ""; return; }}
+  const byCarrier = new Map();
+  for (const r of STATE.filtered) {{
+    if (!byCarrier.has(r.carrier)) {{
+      byCarrier.set(r.carrier, {{
+        carrier: r.carrier, rate_type: r.rate_type,
+        ages: [], min_age: r.age, max_age: r.age,
+        premium_at_min: r.premium, premium_at_max: r.premium,
+      }});
+    }}
+    const v = byCarrier.get(r.carrier);
+    v.ages.push(r);
+    if (r.age < v.min_age) {{ v.min_age = r.age; v.premium_at_min = r.premium; }}
+    if (r.age > v.max_age) {{ v.max_age = r.age; v.premium_at_max = r.premium; }}
+  }}
+  let rows = [...byCarrier.values()];
+  if (tableFilter) rows = rows.filter(r => r.rate_type === tableFilter);
+  rows.forEach(r => {{
+    r.pct = ((r.premium_at_max / r.premium_at_min) - 1) * 100;
+    r.lifetime = r.ages.reduce((s, x) => s + x.premium * 12, 0);
+  }});
+  rows.sort((a, b) => {{
+    const v = typeof a[tableSort.col] === "string"
+      ? a[tableSort.col].localeCompare(b[tableSort.col])
+      : a[tableSort.col] - b[tableSort.col];
+    return v * tableSort.dir;
+  }});
+
+  const labels = {{
+    carrier: "Carrier", rate_type: "Rate type",
+    min_age: "From age", premium_at_min: "Starting $",
+    max_age: "To age", premium_at_max: "Ending $",
+    pct: "Change", lifetime: "Sum × 12",
+  }};
+  const cols = ["carrier", "rate_type", "min_age", "premium_at_min", "max_age", "premium_at_max", "pct", "lifetime"];
+  const numCols = new Set(["min_age", "premium_at_min", "max_age", "premium_at_max", "pct", "lifetime"]);
+  const head = `<thead><tr>${{cols.map(col => {{
+    const arrow = tableSort.col === col ? (tableSort.dir === 1 ? " ▲" : " ▼") : "";
+    return `<th class="${{numCols.has(col) ? "num" : ""}}" data-col="${{col}}">${{labels[col]}}${{arrow}}</th>`;
+  }}).join("")}}</tr></thead>`;
+  const body = `<tbody>${{rows.map(r => `
+    <tr>
+      <td>${{r.carrier}}</td>
+      <td>${{rateTypeTag(r.rate_type)}}</td>
+      <td class="num">${{r.min_age}}</td>
+      <td class="num">$${{r.premium_at_min.toFixed(0)}}</td>
+      <td class="num">${{r.max_age}}</td>
+      <td class="num">$${{r.premium_at_max.toFixed(0)}}</td>
+      <td class="num">${{r.pct >= 0 ? "+" : ""}}${{r.pct.toFixed(0)}}%</td>
+      <td class="num">$${{r.lifetime.toLocaleString(undefined, {{maximumFractionDigits: 0}})}}</td>
+    </tr>`).join("")}}</tbody>`;
+  c.innerHTML = `<table>${{head}}${{body}}</table>`;
+  c.querySelectorAll("th").forEach(th => {{
+    th.addEventListener("click", () => {{
+      const col = th.dataset.col;
+      if (tableSort.col === col) tableSort.dir *= -1;
+      else {{ tableSort.col = col; tableSort.dir = 1; }}
+      renderTable();
+    }});
+  }});
+}}
+
+function rateTypeTag(rt) {{
+  const cls = {{ATTAINED_AGE: "attained", ISSUE_AGE: "issue", COMMUNITY_RATED: "community"}}[rt] || "";
+  return `<span class="tag ${{cls}}">${{rt.replace("_", " ").toLowerCase()}}</span>`;
+}}
+
+function renderAll() {{
+  renderLede();
+  renderGrid();
+  renderOverlay($("show-labels").checked);
+  renderScatter(parseInt($("age-slider").value, 10));
+  renderCumulative();
+  renderTable();
+}}
+
+// ---------- Selector cascade ----------
+
+async function onChange(which) {{
+  const v = $("sel-" + which).value;
+  STATE.selectors[which] = v;
+  // Cascade: changing a higher-level selector resets lower ones to first available.
+  if (which === "state" || which === "plan" || which === "year") {{
+    // Re-derive plan/year/zip options based on new state/plan/year
+    const m = STATE.manifest;
+    const state = STATE.selectors.state;
+    const plans = Object.keys(m.states[state].plans).sort();
+    if (!plans.includes(STATE.selectors.plan)) STATE.selectors.plan = plans[0];
+    setOptions($("sel-plan"), plans, STATE.selectors.plan);
+
+    const years = Object.keys(m.states[state].plans[STATE.selectors.plan].years).sort().reverse();
+    if (!years.includes(STATE.selectors.year)) STATE.selectors.year = years[0];
+    setOptions($("sel-year"), years, STATE.selectors.year);
+
+    const yearData = m.states[state].plans[STATE.selectors.plan].years[STATE.selectors.year];
+    if (!yearData.zips.includes(STATE.selectors.zip)) STATE.selectors.zip = yearData.zips[0];
+    setOptions($("sel-zip"), yearData.zips, STATE.selectors.zip);
+
+    if (!yearData.genders.includes(STATE.selectors.gender)) STATE.selectors.gender = yearData.genders[0];
+    setOptions($("sel-gender"), yearData.genders.map(g => ({{value: g, label: genderLabel(g)}})), STATE.selectors.gender);
+
+    if (!yearData.tobaccos.includes(STATE.selectors.tobacco)) STATE.selectors.tobacco = yearData.tobaccos[0];
+    setOptions($("sel-tobacco"), yearData.tobaccos.map(t => ({{value: t, label: tobaccoLabel(t)}})), STATE.selectors.tobacco);
+
+    await loadShard();
+  }}
+  applyFilter();
+  writeURL();
+  renderAll();
+}}
+
+async function init() {{
+  const r = await fetch(MANIFEST_URL);
+  STATE.manifest = await r.json();
+  $("refreshed-date").textContent = STATE.manifest.refreshed;
+  await populateSelectors();
+  await loadShard();
+  applyFilter();
+  writeURL();
+  renderAll();
+
+  for (const k of ["state", "plan", "year", "zip", "gender", "tobacco"]) {{
+    $("sel-" + k).addEventListener("change", () => onChange(k));
+  }}
+  $("show-labels").addEventListener("change", e => renderOverlay(e.target.checked));
+  $("age-slider").addEventListener("input", e => {{
+    const age = parseInt(e.target.value, 10);
+    $("age-readout").textContent = age;
+    renderScatter(age);
+  }});
+  $("table-filter").addEventListener("change", e => {{
+    tableFilter = e.target.value;
+    renderTable();
+  }});
+}}
+
+init().catch(err => {{
+  console.error(err);
+  document.querySelector("main").insertAdjacentHTML(
+    "afterbegin",
+    `<div class="callout"><strong>Error loading data.</strong> ${{err.message}}</div>`
+  );
+}});
+</script>
+</body>
+</html>
+"""
+
+
+def build_index(refreshed: str) -> None:
+    (DIST / "index.html").write_text(PAGE_TEMPLATE.format(built=dt.date.today().isoformat()))
+    shutil.copy2(ROOT / "style.css", DIST / "style.css")
+
+
+def main() -> int:
+    if not db.DEFAULT_DB_PATH.exists():
+        print(f"error: {db.DEFAULT_DB_PATH} not found. Run scrape.py first.", file=sys.stderr)
+        return 1
+    if DIST.exists():
+        shutil.rmtree(DIST)
+    DIST.mkdir(parents=True)
+
+    with db.connect(read_only=True) as conn:
+        manifest = build_data_shards(conn)
+    n_shards = len(list(DATA_OUT.glob("*.json"))) - 1  # minus manifest
+    print(f"emitted {n_shards} data shard(s) + manifest (snapshot {manifest['refreshed']})")
+
+    build_index(manifest["refreshed"])
+    print(f"built {(DIST / 'index.html').relative_to(ROOT)}")
+    print(f"\nopen file://{DIST / 'index.html'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
