@@ -1,4 +1,5 @@
 """Tests for site/build.py — DB → JSON shard generation."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -44,10 +45,14 @@ def seeded_db(tmp_path, row_factory, monkeypatch):
             ("First Health", "ATTAINED_AGE", 166.50),
             ("AARP Standard", "COMMUNITY_RATED", 192.88),
         ]:
-            rows.append(row_factory(
-                carrier=carrier, rate_type=rate_type,
-                age=age, premium=base + age - 65,
-            ))
+            rows.append(
+                row_factory(
+                    carrier=carrier,
+                    rate_type=rate_type,
+                    age=age,
+                    premium=base + age - 65,
+                )
+            )
     with db.connect(path) as conn:
         db.upsert_rows(conn, rows)
     return path
@@ -66,14 +71,14 @@ def build_in_tmp(tmp_path, monkeypatch, seeded_db):
 
 class TestShardGeneration:
     def test_emits_one_shard_per_combo(self, build_in_tmp):
-        dist, data_out = build_in_tmp
+        _dist, data_out = build_in_tmp
         with db.connect(read_only=True) as conn:
             site_build.build_data_shards(conn)
         shards = sorted(p.name for p in data_out.glob("*.json"))
         assert shards == ["CA-G-2026.json", "manifest.json"]
 
     def test_shard_contents(self, build_in_tmp):
-        dist, data_out = build_in_tmp
+        _dist, data_out = build_in_tmp
         with db.connect(read_only=True) as conn:
             site_build.build_data_shards(conn)
         shard = json.loads((data_out / "CA-G-2026.json").read_text())
@@ -90,7 +95,7 @@ class TestShardGeneration:
 
     def test_tobacco_serialized_as_string(self, build_in_tmp):
         """Frontend expects 'false'/'true' strings, not bools."""
-        dist, data_out = build_in_tmp
+        _dist, data_out = build_in_tmp
         with db.connect(read_only=True) as conn:
             site_build.build_data_shards(conn)
         shard = json.loads((data_out / "CA-G-2026.json").read_text())
@@ -98,7 +103,7 @@ class TestShardGeneration:
             assert r["tobacco"] in ("true", "false")
 
     def test_manifest_aggregates_combos(self, build_in_tmp):
-        dist, data_out = build_in_tmp
+        _dist, data_out = build_in_tmp
         with db.connect(read_only=True) as conn:
             site_build.build_data_shards(conn)
         m = json.loads((data_out / "manifest.json").read_text())
@@ -109,7 +114,7 @@ class TestShardGeneration:
         assert year["n_carriers"] == 2
 
     def test_manifest_includes_birthday_rule(self, build_in_tmp):
-        dist, data_out = build_in_tmp
+        _dist, data_out = build_in_tmp
         with db.connect(read_only=True) as conn:
             site_build.build_data_shards(conn)
         m = json.loads((data_out / "manifest.json").read_text())

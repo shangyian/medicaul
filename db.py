@@ -9,12 +9,13 @@ Schema is initialized lazily on first connect; this module is the single
 source of truth for the table shape. Both scrape.py and build.py go through
 here.
 """
+
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterable, Iterator
 
 import duckdb
 
@@ -41,9 +42,20 @@ CREATE TABLE IF NOT EXISTS premiums (
 """
 
 INSERT_COLS = [
-    "snapshot_date", "state", "zip", "plan", "year",
-    "carrier", "rate_type", "age", "gender", "tobacco", "premium",
-    "phone", "website", "address",
+    "snapshot_date",
+    "state",
+    "zip",
+    "plan",
+    "year",
+    "carrier",
+    "rate_type",
+    "age",
+    "gender",
+    "tobacco",
+    "premium",
+    "phone",
+    "website",
+    "address",
 ]
 
 
@@ -73,7 +85,9 @@ def normalize_rate_type(v: str) -> str:
 
 
 @contextmanager
-def connect(path: Path | str | None = None, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
+def connect(
+    path: Path | str | None = None, *, read_only: bool = False
+) -> Iterator[duckdb.DuckDBPyConnection]:
     """Open the DB, ensuring the schema exists. Use as a context manager.
 
     `path` defaults to the module-level DEFAULT_DB_PATH at call time (not
@@ -99,22 +113,24 @@ def upsert_rows(conn: duckdb.DuckDBPyConnection, rows: Iterable[dict]) -> int:
     normalized = []
     today = dt.date.today()
     for r in rows:
-        normalized.append((
-            r.get("snapshot_date", today),
-            r["state"],
-            str(r["zip"]),
-            r["plan"],
-            int(r["year"]),
-            r["carrier"],
-            normalize_rate_type(r["rate_type"]),
-            int(r["age"]),
-            normalize_gender(r["gender"]),
-            normalize_tobacco(r["tobacco"]),
-            float(r["premium"]),
-            r.get("phone"),
-            r.get("website"),
-            r.get("address"),
-        ))
+        normalized.append(
+            (
+                r.get("snapshot_date", today),
+                r["state"],
+                str(r["zip"]),
+                r["plan"],
+                int(r["year"]),
+                r["carrier"],
+                normalize_rate_type(r["rate_type"]),
+                int(r["age"]),
+                normalize_gender(r["gender"]),
+                normalize_tobacco(r["tobacco"]),
+                float(r["premium"]),
+                r.get("phone"),
+                r.get("website"),
+                r.get("address"),
+            )
+        )
     if not normalized:
         return 0
     placeholders = "(" + ",".join(["?"] * len(INSERT_COLS)) + ")"

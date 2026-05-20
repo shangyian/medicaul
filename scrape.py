@@ -11,6 +11,7 @@ So for each (zip, plan, year) we sweep the (age, gender, tobacco) grid.
 We use Playwright to mint Akamai's bot-protection cookies (`_abck`, `bm_sz`),
 then issue JSON requests from inside the browser context via `ctx.request.get`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -21,10 +22,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from playwright.sync_api import sync_playwright, BrowserContext
+from playwright.sync_api import BrowserContext, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import db  # noqa: E402
+import db
 
 API_BASE = "https://www.medicare.gov/api/v1/data/plan-compare"
 LANDING = "https://www.medicare.gov/medigap-supplemental-insurance-plans/"
@@ -73,9 +74,7 @@ def fetch_policies(
         timeout=30_000,
     )
     if not resp.ok:
-        raise RuntimeError(
-            f"{resp.status} {resp.status_text} params={params}\n{resp.text()[:300]}"
-        )
+        raise RuntimeError(f"{resp.status} {resp.status_text} params={params}\n{resp.text()[:300]}")
     body = resp.json()
     return body.get("policies", []) or []
 
@@ -217,11 +216,7 @@ def main(argv: list[str]) -> int:
     plans = PLAN_LETTERS if args.plan == "all" else [args.plan.upper()]
     ages = parse_ages(args.ages)
     tobaccos = TOBACCOS if args.tobacco == "both" else [args.tobacco]
-    genders = (
-        GENDERS
-        if args.gender == "both"
-        else [f"GENDER_{args.gender.upper()}"]
-    )
+    genders = GENDERS if args.gender == "both" else [f"GENDER_{args.gender.upper()}"]
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -271,7 +266,9 @@ def main(argv: list[str]) -> int:
                         n_written = db.upsert_rows(conn, db_rows_for_upsert(rows))
                     else:
                         n_written = 0
-                    log(f"[ok]   {tag}: {len(rows)} rows scraped, {n_written} written to DB ({time.time()-t0:.1f}s)")
+                    log(
+                        f"[ok]   {tag}: {len(rows)} rows scraped, {n_written} written to DB ({time.time() - t0:.1f}s)"
+                    )
 
         ctx.close()
         browser.close()

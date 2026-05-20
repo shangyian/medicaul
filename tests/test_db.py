@@ -1,4 +1,5 @@
 """Tests for db.py — the storage layer."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -9,23 +10,26 @@ import db
 
 
 class TestNormalizers:
-    @pytest.mark.parametrize("inp,expected", [
-        (True, True),
-        (False, False),
-        ("true", True),
-        ("false", False),
-        ("True", True),
-        ("FALSE", False),
-        ("t", True),
-        ("f", False),
-        ("1", True),
-        ("0", False),
-        ("yes", True),
-        ("no", False),
-        ("", False),
-        (1, True),
-        (0, False),
-    ])
+    @pytest.mark.parametrize(
+        "inp,expected",
+        [
+            (True, True),
+            (False, False),
+            ("true", True),
+            ("false", False),
+            ("True", True),
+            ("FALSE", False),
+            ("t", True),
+            ("f", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+            ("", False),
+            (1, True),
+            (0, False),
+        ],
+    )
     def test_tobacco_accepts_common_shapes(self, inp, expected):
         assert db.normalize_tobacco(inp) is expected
 
@@ -33,14 +37,17 @@ class TestNormalizers:
         with pytest.raises(ValueError):
             db.normalize_tobacco("maybe")
 
-    @pytest.mark.parametrize("inp,expected", [
-        ("FEMALE", "FEMALE"),
-        ("MALE", "MALE"),
-        ("GENDER_FEMALE", "FEMALE"),
-        ("GENDER_MALE", "MALE"),
-        ("female", "FEMALE"),
-        ("male", "MALE"),
-    ])
+    @pytest.mark.parametrize(
+        "inp,expected",
+        [
+            ("FEMALE", "FEMALE"),
+            ("MALE", "MALE"),
+            ("GENDER_FEMALE", "FEMALE"),
+            ("GENDER_MALE", "MALE"),
+            ("female", "FEMALE"),
+            ("male", "MALE"),
+        ],
+    )
     def test_gender_strips_prefix_and_uppercases(self, inp, expected):
         assert db.normalize_gender(inp) == expected
 
@@ -48,13 +55,16 @@ class TestNormalizers:
         with pytest.raises(ValueError):
             db.normalize_gender("nonbinary")
 
-    @pytest.mark.parametrize("inp,expected", [
-        ("ATTAINED_AGE", "ATTAINED_AGE"),
-        ("MEDIGAP_RATE_TYPE_ATTAINED_AGE", "ATTAINED_AGE"),
-        ("MEDIGAP_RATE_TYPE_ISSUE_AGE", "ISSUE_AGE"),
-        ("MEDIGAP_RATE_TYPE_COMMUNITY_RATED", "COMMUNITY_RATED"),
-        ("attained_age", "ATTAINED_AGE"),
-    ])
+    @pytest.mark.parametrize(
+        "inp,expected",
+        [
+            ("ATTAINED_AGE", "ATTAINED_AGE"),
+            ("MEDIGAP_RATE_TYPE_ATTAINED_AGE", "ATTAINED_AGE"),
+            ("MEDIGAP_RATE_TYPE_ISSUE_AGE", "ISSUE_AGE"),
+            ("MEDIGAP_RATE_TYPE_COMMUNITY_RATED", "COMMUNITY_RATED"),
+            ("attained_age", "ATTAINED_AGE"),
+        ],
+    )
     def test_rate_type_strips_prefix(self, inp, expected):
         assert db.normalize_rate_type(inp) == expected
 
@@ -128,9 +138,12 @@ class TestLatestSnapshot:
         assert db.latest_snapshot(db_conn) is None
 
     def test_returns_max_date(self, db_conn, row_factory):
-        db.upsert_rows(db_conn, [
-            row_factory(snapshot_date=dt.date(2026, 3, 1), age=65),
-            row_factory(snapshot_date=dt.date(2026, 5, 1), age=66),
-            row_factory(snapshot_date=dt.date(2026, 4, 1), age=67),
-        ])
+        db.upsert_rows(
+            db_conn,
+            [
+                row_factory(snapshot_date=dt.date(2026, 3, 1), age=65),
+                row_factory(snapshot_date=dt.date(2026, 5, 1), age=66),
+                row_factory(snapshot_date=dt.date(2026, 4, 1), age=67),
+            ],
+        )
         assert db.latest_snapshot(db_conn) == dt.date(2026, 5, 1)
