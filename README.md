@@ -2,8 +2,6 @@
 
 A neutral data tool for comparing Medicare supplement (Medigap) insurance rates. Pulls premium data from medicare.gov's public plan-compare API, stores it in DuckDB, and renders an interactive static site for browsing.
 
-Not a broker. No quotes, no calls, no email signup.
-
 ## Architecture
 
 ```
@@ -47,10 +45,33 @@ Raw API responses are archived in `out/<zip>_<plan>_<year>.json` — those are t
 
 ```bash
 uv run python site/build.py
-open site/dist/index.html
 ```
 
 `build.py` reads only the most-recent snapshot from the DB and emits one JSON shard per `(state, plan, year)` to `site/dist/data/`, plus the dynamic `index.html` explorer. Older snapshots remain in the DB for time-series work.
+
+## View the site locally
+
+The frontend fetches JSON shards at runtime, which most browsers block over `file://` for CORS reasons. Serve `site/dist/` over HTTP instead:
+
+```bash
+uv run python -m http.server -d site/dist 8888
+```
+
+Open <http://localhost:8888/>. Stop with Ctrl-C.
+
+If you're iterating on `site/build.py` or `site/style.css`, rebuild and refresh:
+
+```bash
+# rebuild (in a second terminal)
+uv run python site/build.py
+# then Cmd-R / Ctrl-R in the browser
+```
+
+For a zero-friction loop, [`entr`](https://eradman.com/entrproject/) re-runs on save:
+
+```bash
+find site/ db.py -type f | entr -r uv run python site/build.py
+```
 
 ## Tests
 
