@@ -2,4 +2,5 @@ playwright>=1.47
 pandas>=2.2
 matplotlib>=3.8
 duckdb>=1.0
+pytest>=8.0
 

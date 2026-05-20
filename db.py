@@ -73,9 +73,14 @@ def normalize_rate_type(v: str) -> str:
 
 
 @contextmanager
-def connect(path: Path | str = DEFAULT_DB_PATH, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open the DB, ensuring the schema exists. Use as a context manager."""
-    conn = duckdb.connect(str(path), read_only=read_only)
+def connect(path: Path | str | None = None, *, read_only: bool = False) -> Iterator[duckdb.DuckDBPyConnection]:
+    """Open the DB, ensuring the schema exists. Use as a context manager.
+
+    `path` defaults to the module-level DEFAULT_DB_PATH at call time (not
+    function-definition time), so tests can monkeypatch DEFAULT_DB_PATH.
+    """
+    resolved = Path(path) if path is not None else DEFAULT_DB_PATH
+    conn = duckdb.connect(str(resolved), read_only=read_only)
     try:
         if not read_only:
             conn.execute(SCHEMA)
