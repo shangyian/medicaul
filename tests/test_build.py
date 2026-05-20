@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -10,10 +11,27 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-sys.path.insert(0, str(PROJECT_ROOT / "site"))
 
 import db  # noqa: E402
-import build as site_build  # noqa: E402
+
+
+def _load_site_build():
+    """
+    Load site/build.py by file path. We don't go through `import build`
+    because that collides with the unrelated PyPI package named `build`
+    (the PEP 517 frontend), which is commonly present in environments.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "medicaul_site_build", PROJECT_ROOT / "site" / "build.py"
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load site/build.py from {PROJECT_ROOT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+site_build = _load_site_build()
 
 
 @pytest.fixture
