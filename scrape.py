@@ -14,7 +14,6 @@ then issue JSON requests from inside the browser context via `ctx.request.get`.
 from __future__ import annotations
 
 import argparse
-import csv
 import itertools
 import json
 import sys
@@ -23,6 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from playwright.sync_api import sync_playwright, BrowserContext
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import db  # noqa: E402
 
 API_BASE = "https://www.medicare.gov/api/v1/data/plan-compare"
 LANDING = "https://www.medicare.gov/medigap-supplemental-insurance-plans/"
@@ -141,25 +143,27 @@ def sweep(
     return rows
 
 
-CSV_FIELDS = [
-    "zip", "state", "plan", "year",
-    "age", "gender", "tobacco",
-    "carrier", "rate_type", "monthly_premium",
-    "hhd_standard_min", "hhd_standard_max",
-    "phone", "website", "address",
-]
-
-
-def write_csv(rows: list[dict], path: Path) -> None:
-    if not rows:
-        return
-    new = not path.exists()
-    with path.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        if new:
-            w.writeheader()
-        for row in rows:
-            w.writerow({k: row.get(k) for k in CSV_FIELDS})
+def db_rows_for_upsert(rows: list[dict]) -> list[dict]:
+    """Reshape sweep() rows into the dict shape db.upsert_rows expects."""
+    return [
+        {
+            "state": r["state"],
+            "zip": r["zip"],
+            "plan": r["plan"],
+            "year": r["year"],
+            "carrier": r["carrier"],
+            "rate_type": r["rate_type"],
+            "age": r["age"],
+            "gender": r["gender"],
+            "tobacco": r["tobacco"],
+            "premium": r["monthly_premium"],
+            "phone": r.get("phone"),
+            "website": r.get("website"),
+            "address": r.get("address"),
+        }
+        for r in rows
+        if r.get("monthly_premium") is not None
+    ]
 
 
 def load_targets(arg_zip, arg_state, arg_zips_file) -> list[tuple[str, str]]:
@@ -221,7 +225,6 @@ def main(argv: list[str]) -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = out_dir / "rates.csv"
 
     def log(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
@@ -246,26 +249,29 @@ def main(argv: list[str]) -> int:
         log(f"[warmup] {LANDING}")
         warm_up(ctx)
 
-        for state, zipcode in targets:
-            for plan in plans:
-                tag = f"{zipcode}_{plan}_{args.year}"
-                t0 = time.time()
-                rows = sweep(
-                    ctx,
-                    state=state,
-                    zipcode=zipcode,
-                    plan=plan,
-                    year=args.year,
-                    ages=ages,
-                    genders=genders,
-                    tobaccos=tobaccos,
-                    sleep_s=args.sleep,
-                    log=log,
-                )
-                if rows:
-                    (out_dir / f"{tag}.json").write_text(json.dumps(rows, indent=2))
-                    write_csv(rows, csv_path)
-                log(f"[ok]   {tag}: {len(rows)} rows in {time.time()-t0:.1f}s")
+        with db.connect() as conn:
+            for state, zipcode in targets:
+                for plan in plans:
+                    tag = f"{zipcode}_{plan}_{args.year}"
+                    t0 = time.time()
+                    rows = sweep(
+                        ctx,
+                        state=state,
+                        zipcode=zipcode,
+                        plan=plan,
+                        year=args.year,
+                        ages=ages,
+                        genders=genders,
+                        tobaccos=tobaccos,
+                        sleep_s=args.sleep,
+                        log=log,
+                    )
+                    if rows:
+                        (out_dir / f"{tag}.json").write_text(json.dumps(rows, indent=2))
+                        n_written = db.upsert_rows(conn, db_rows_for_upsert(rows))
+                    else:
+                        n_written = 0
+                    log(f"[ok]   {tag}: {len(rows)} rows scraped, {n_written} written to DB ({time.time()-t0:.1f}s)")
 
         ctx.close()
         browser.close()

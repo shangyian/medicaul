@@ -1,3 +1,9 @@
+# medicaul build artifacts (derivable from the raw scrape JSONs in out/)
+data.duckdb
+data.duckdb.wal
+out/
+site/dist/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -164,8 +170,8 @@ venv.bak/
 # Rope project settings
 .ropeproject
 
-# mkdocs documentation
-/site
+# mkdocs documentation — disabled; we use `site/` for the actual frontend source
+# /site
 
 # mypy
 .mypy_cache/
