@@ -1,0 +1,42 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      # Pin to public PyPI explicitly. Some runner images preset
+      # UV_INDEX_URL to an internal mirror that isn't reachable from
+      # GitHub-hosted runners — this overrides that.
+      UV_INDEX_URL: https://pypi.org/simple
+      UV_NO_CONFIG: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Run tests
+        run: uv run pytest -v
+
+      - name: Verify build runs without a DB
+        # The build script should fail cleanly when data.duckdb is absent,
+        # not raise an unrelated error.
+        run: |
+          rm -f data.duckdb
+          ! uv run python site/build.py

@@ -1,8 +1,12 @@
-# medicaul build artifacts (derivable from the raw scrape JSONs in out/)
+# medicaul build artifacts
 data.duckdb
 data.duckdb.wal
-out/
 site/dist/
+
+# Raw scrape archives — keep recent ones gitted if you want, but the directory
+# can balloon over time; leaving uncommitted by default. Promote individual
+# files when worth archiving.
+out/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
