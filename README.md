@@ -60,6 +60,16 @@ uv run pytest
 
 CI runs on every push and PR via [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
+## Deploy to GitHub Pages
+
+```bash
+./deploy.sh
+```
+
+Builds the site and pushes `site/dist/` to the `gh-pages` branch on `origin`. After the first run, configure GitHub Pages once: repo Settings → Pages → Source: *Deploy from a branch* → Branch: `gh-pages`, Folder: `/ (root)`. The site goes live at `https://<user>.github.io/<repo>/` within a minute or so.
+
+Subsequent deploys are idempotent — `./deploy.sh` rebuilds, syncs, and only pushes if anything changed. Uses a temporary `git worktree` so your working tree isn't touched.
+
 ## Endpoints
 
 Base: `https://www.medicare.gov/api/v1/data/plan-compare`

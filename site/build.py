@@ -797,6 +797,9 @@ init().catch(err => {{
 def build_index(refreshed: str) -> None:
     (DIST / "index.html").write_text(PAGE_TEMPLATE.format(built=dt.date.today().isoformat()))
     shutil.copy2(ROOT / "style.css", DIST / "style.css")
+    # Tell GitHub Pages to serve files verbatim — don't run Jekyll, which
+    # would otherwise mangle anything starting with `_`.
+    (DIST / ".nojekyll").touch()
 
 
 def main() -> int:
