@@ -184,14 +184,14 @@ PAGE_TEMPLATE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>medicaul — Medigap rate explorer</title>
 <link rel="stylesheet" href="style.css">
-<meta name="description" content="Neutral, interactive view of Medicare supplement (Medigap) rates. Not a broker.">
+<meta name="description" content="Neutral, interactive view of Medicare supplement (Medigap) rates.">
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script src="https://cdn.jsdelivr.net/npm/@observablehq/plot@0.6"></script>
 </head>
 <body>
 <header>
   <a class="wordmark" href="./">medicaul</a>
-  <div class="tagline">Medicare supplement (Medigap) rate data. Not a broker. No quotes, no calls, no email signup.</div>
+  <div class="tagline">Medicare supplement (Medigap) rate data.</div>
 </header>
 <main>
 
