@@ -1,0 +1,29 @@
+{
+  "refreshed": "2026-05-20",
+  "built": "2026-05-20",
+  "states": {
+    "CA": {
+      "name": "California",
+      "birthday_rule": "Each year, for at least 30 days starting on your birthday, you can switch to any equal-or-lesser Plan from any carrier with no medical underwriting.",
+      "plans": {
+        "G": {
+          "years": {
+            "2026": {
+              "zips": [
+                "94582"
+              ],
+              "genders": [
+                "FEMALE",
+                "MALE"
+              ],
+              "tobaccos": [
+                "false"
+              ],
+              "n_carriers": 23
+            }
+          }
+        }
+      }
+    }
+  }
+}
